@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Spell Chase - With Start Screen</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #000;
+      color: #fff;
+      font-family: 'Trebuchet MS', sans-serif;
+      text-align: center;
+    }
+    #gameCanvas {
+      display: block;
+      margin: 0 auto;
+      border: 2px solid #555;
+    }
+    #ui {
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translate(-50%, 0);
+      width: 100%;
+      max-width: 800px;
+      color: #fff;
+      text-shadow: 2px 2px 3px rgba(0,0,0,0.8);
+      padding: 8px;
+      pointer-events: none;
+    }
+    #wordContainer, #livesContainer, #message {
+      margin: 5px 0;
+    }
+    #message {
+      color: #ffdf00;
+      font-weight: bold;
+    }
+
+    /* Start Screen Overlay */
+    #startScreen {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(0, 0, 0, 0.9);
+      color: #fff;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 10; /* on top of everything */
+    }
+    #startScreen h1 {
+      font-size: 2em;
+      margin-bottom: 0.5em;
+    }
+    #startScreen p {
+      font-size: 1em;
+      max-width: 500px;
+      margin-bottom: 1em;
+      line-height: 1.5;
+    }
+    #startScreen button {
+      padding: 12px 24px;
+      font-size: 1em;
+      background: #444;
+      color: #fff;
+      border: 2px solid #888;
+      cursor: pointer;
+    }
+    #startScreen button:hover {
+      background: #666;
+    }
+  </style>
+</head>
+<body>
+  <!-- Start Screen Overlay -->
+  <div id="startScreen">
+    <h1>Spell Chase</h1>
+    <p>
+      Welcome to Spell Chase!  
+      <br><br>
+      <strong>Goal:</strong> Collect letters to form the target word while avoiding enemies.  
+      <br>
+      <strong>Controls:</strong>
+      <ul style="text-align:left; max-width:300px; margin: 0 auto;">
+        <li>Arrow Keys or WASD to move</li>
+        <li>Space to fire a missile (when you have at least one)</li>
+        <li>R to restart if you lose all lives</li>
+      </ul>
+      <strong>Power-Ups:</strong> Freeze (F), Shield (S), Speed Boost (B), Health (H), Missile (M).
+      <br>
+      Each power-up grants a unique effect to help you survive and collect letters.
+    </p>
+    <button id="startButton">Start Game</button>
+  </div>
+
+  <!-- Main Game Canvas & UI -->
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <div id="ui">
+    <div id="wordContainer">Word: <span id="wordStatus"></span></div>
+    <div id="livesContainer">Lives: <span id="livesCount">3</span></div>
+    <div id="message"></div>
+  </div>
+
+<script>
+// ==================== CONFIGURATION & CONSTANTS ====================
+const CANVAS_WIDTH = 800;
+const CANVAS_HEIGHT = 600;
+
+// Player
+const BASE_PLAYER_SPEED = 3;
+const PLAYER_RADIUS = 20;
+
+// Enemy
+const ENEMY_SPEED = 1.6;
+const ENEMY_RADIUS = 20;
+
+// Friendly NPC (letters)
+const FRIEND_SPEED = 2;
+const FRIEND_RADIUS = 15;
+
+// Power-Ups
+const POWERUP_RADIUS = 15;
+const POWERUP_SPAWN_INTERVAL = 480; // frames (~8s at 60fps)
+const COLLISION_DISTANCE = 30;     // approximate sum of radii
+const SPAWN_BUFFER = 50;           // margin from edges when spawning
+
+const MAX_LIVES = 3;
+
+// Additional Timers
+const FREEZE_DURATION = 300; // 5s
+const SHIELD_DURATION = 300; // 5s
+const BOOST_DURATION = 300;  // 5s
+
+// Enemy AI
+const SEPARATION_DISTANCE = 40;
+const SEPARATION_STRENGTH = 0.5;
+const FLANK_DISTANCE = 60;
+
+// Levels (word + # of enemies)
+const LEVELS = [
+  { word: 'NOW',   enemyCount: 2 },
+  { word: 'GGWP',  enemyCount: 3 },
+  { word: 'CODE',  enemyCount: 4 },
+  { word: 'MAGIC', enemyCount: 5 },
+];
+
+// ==================== POWER-UP DEFINITIONS ====================
+const powerUpTypes = [
+  { type: 'freeze',  label: 'F', color: 'cyan'    },
+  { type: 'shield',  label: 'S', color: 'magenta' },
+  { type: 'boost',   label: 'B', color: 'lime'    },
+  { type: 'health',  label: 'H', color: 'white'   },
+  { type: 'missile', label: 'M', color: 'orange'  }
+];
+
+// ==================== GAME STATE VARIABLES ====================
+let canvas, ctx;
+let showStartScreen = true;   // game initially in start-screen mode
+let gameInitialized = false;  // once we start the game, we load the first level
+
+let currentLevelIndex = 0;
+let targetWord = '';
+let collectedLetters = '';
+
+// Player
+let player = { x: 400, y: 300, vx: 0, vy: 0 };
+let playerSpeedMultiplier = 1.0;
+
+// Timers
+let freezeTimer = 0;
+let shieldTimer = 0;
+let boostTimer = 0;
+
+// Enemies
+let enemies = [];
+
+// Friendly NPC
+let friendNPC = null;
+let friendLetterIndex = 0;
+
+// Lives / Game Over
+let lives = MAX_LIVES;
+let isGameOver = false;
+let message = '';
+
+// Power Up
+let powerUp = null;
+let powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
+
+// Missiles
+let missileShots = 0;
+let missiles = [];
+
+// For star background
+let stars = [];
+const STAR_COUNT = 100;
+
+// ==================== INITIALIZATION ====================
+window.onload = () => {
+  // Canvas & Context
+  canvas = document.getElementById('gameCanvas');
+  ctx = canvas.getContext('2d');
+
+  // Starfield
+  initStarfield();
+
+  // Listen for start screen button
+  const startButton = document.getElementById('startButton');
+  startButton.addEventListener('click', onStartGame);
+
+  // Listen for keyboard inputs
+  window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('keyup', onKeyUp);
+
+  // Main loop
+  gameLoop();
+};
+
+// Called once when user clicks "Start Game"
+function onStartGame() {
+  // Hide start screen
+  document.getElementById('startScreen').style.display = 'none';
+  showStartScreen = false;
+
+  // Now we init the game
+  if (!gameInitialized) {
+    gameInitialized = true;
+    loadLevel(0); // start from level 0
+  }
+}
+
+function loadLevel(index) {
+  if (index < LEVELS.length) {
+    let lvl = LEVELS[index];
+    targetWord = lvl.word;
+    collectedLetters = '';
+    friendLetterIndex = 0;
+
+    // Initialize game objects
+    enemies = createEnemies(lvl.enemyCount);
+    friendNPC = createFriendNPC(targetWord[friendLetterIndex]);
+    resetPlayer();
+
+    // Reset states
+    lives = MAX_LIVES;
+    isGameOver = false;
+    message = '';
+    powerUp = null;
+    powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
+
+    freezeTimer = 0;
+    shieldTimer = 0;
+    boostTimer = 0;
+    playerSpeedMultiplier = 1.0;
+
+    // Missiles
+    missileShots = 0;
+    missiles = [];
+
+    currentLevelIndex = index;
+    updateUI();
+  } else {
+    message = 'CONGRATULATIONS! You completed all levels!';
+    isGameOver = true;
+    updateUI();
+  }
+}
+
+function resetPlayer() {
+  player.x = CANVAS_WIDTH / 2;
+  player.y = CANVAS_HEIGHT / 2;
+  player.vx = 0;
+  player.vy = 0;
+}
+
+function initStarfield() {
+  stars = [];
+  for (let i = 0; i < STAR_COUNT; i++) {
+    stars.push({
+      x: Math.random() * CANVAS_WIDTH,
+      y: Math.random() * CANVAS_HEIGHT,
+      size: Math.random() * 2 + 0.5,
+      alpha: Math.random() * 0.5 + 0.5
+    });
+  }
+}
+
+// ==================== MAIN GAME LOOP ====================
+function gameLoop() {
+  // Render either the start screen or the game
+  if (!showStartScreen) {
+    // Game is in action
+    if (!isGameOver) {
+      update();
+    }
+    render();
+  } else {
+    // If we want a background even behind the start screen,
+    // we could optionally draw the background here.
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+// ==================== GAME UPDATE ====================
+function update() {
+  handlePlayerInput();
+  movePlayer();
+
+  // Freeze
+  if (freezeTimer > 0) {
+    freezeTimer--;
+  } else {
+    moveEnemies();
+  }
+
+  // Shield / Boost
+  if (shieldTimer > 0) shieldTimer--;
+  if (boostTimer > 0) {
+    boostTimer--;
+    if (boostTimer <= 0) {
+      playerSpeedMultiplier = 1.0;
+      message = '';
+      updateUI();
+    }
+  }
+
+  moveFriendNPC();
+  updatePowerUpLogic();
+  updateMissiles();
+  checkCollisions();
+}
+
+// ==================== ENTITY CREATION ====================
+function createEnemies(count) {
+  let arr = [];
+  for (let i = 0; i < count; i++) {
+    arr.push({
+      x: randomRange(SPAWN_BUFFER, CANVAS_WIDTH - SPAWN_BUFFER),
+      y: randomRange(SPAWN_BUFFER, CANVAS_HEIGHT - SPAWN_BUFFER),
+      vx: 0,
+      vy: 0
+    });
+  }
+  return arr;
+}
+
+function createFriendNPC(letter) {
+  return {
+    x: randomRange(SPAWN_BUFFER, CANVAS_WIDTH - SPAWN_BUFFER),
+    y: randomRange(SPAWN_BUFFER, CANVAS_HEIGHT - SPAWN_BUFFER),
+    letter: letter
+  };
+}
+
+function spawnPowerUp() {
+  const puType = powerUpTypes[Math.floor(Math.random() * powerUpTypes.length)];
+  powerUp = {
+    x: randomRange(SPAWN_BUFFER, CANVAS_WIDTH - SPAWN_BUFFER),
+    y: randomRange(SPAWN_BUFFER, CANVAS_HEIGHT - SPAWN_BUFFER),
+    active: true,
+    type: puType.type,
+    label: puType.label,
+    color: puType.color
+  };
+}
+
+// ==================== PLAYER INPUT ====================
+let keys = {};
+
+function onKeyDown(e) {
+  keys[e.code] = true;
+
+  // Press Space to fire a missile
+  if (e.code === 'Space') {
+    if (missileShots > 0 && enemies.length > 0 && !isGameOver) {
+      fireMissile();
+      missileShots--;
+      updateUI();
+    }
+  }
+
+  // Press R to restart if game over
+  if (e.code === 'KeyR' && isGameOver) {
+    loadLevel(currentLevelIndex);
+  }
+}
+
+function onKeyUp(e) {
+  keys[e.code] = false;
+}
+
+function handlePlayerInput() {
+  let speed = BASE_PLAYER_SPEED * playerSpeedMultiplier;
+  player.vx = 0;
+  player.vy = 0;
+
+  if (keys['ArrowLeft'] || keys['KeyA']) {
+    player.vx = -speed;
+  }
+  if (keys['ArrowRight'] || keys['KeyD']) {
+    player.vx = speed;
+  }
+  if (keys['ArrowUp'] || keys['KeyW']) {
+    player.vy = -speed;
+  }
+  if (keys['ArrowDown'] || keys['KeyS']) {
+    player.vy = speed;
+  }
+}
+
+// ==================== PLAYER MOVEMENT ====================
+function movePlayer() {
+  player.x += player.vx;
+  player.y += player.vy;
+  // clamp boundaries
+  player.x = Math.max(PLAYER_RADIUS, Math.min(CANVAS_WIDTH - PLAYER_RADIUS, player.x));
+  player.y = Math.max(PLAYER_RADIUS, Math.min(CANVAS_HEIGHT - PLAYER_RADIUS, player.y));
+}
+
+// ==================== ENEMY MOVEMENT ====================
+function moveEnemies() {
+  enemies.forEach((enemy, i) => {
+    let angleOffset = (2 * Math.PI / enemies.length) * i;
+    let flankX = FLANK_DISTANCE * Math.cos(angleOffset);
+    let flankY = FLANK_DISTANCE * Math.sin(angleOffset);
+
+    let targetX = player.x + flankX;
+    let targetY = player.y + flankY;
+    let dx = targetX - enemy.x;
+    let dy = targetY - enemy.y;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+
+    if (dist > 0.1) {
+      enemy.vx = (dx / dist) * ENEMY_SPEED;
+      enemy.vy = (dy / dist) * ENEMY_SPEED;
+    } else {
+      enemy.vx = 0;
+      enemy.vy = 0;
+    }
+
+    // Separation
+    enemies.forEach((other, j) => {
+      if (j === i) return;
+      let dx2 = enemy.x - other.x;
+      let dy2 = enemy.y - other.y;
+      let dist2 = Math.sqrt(dx2*dx2 + dy2*dy2);
+      if (dist2 < SEPARATION_DISTANCE && dist2 > 0) {
+        let force = (SEPARATION_DISTANCE - dist2) / dist2 * SEPARATION_STRENGTH;
+        enemy.vx += (dx2 / dist2) * force;
+        enemy.vy += (dy2 / dist2) * force;
+      }
+    });
+  });
+
+  enemies.forEach(enemy => {
+    enemy.x += enemy.vx;
+    enemy.y += enemy.vy;
+  });
+}
+
+// ==================== FRIENDLY NPC ====================
+function moveFriendNPC() {
+  if (!friendNPC) return;
+  let dx = player.x - friendNPC.x;
+  let dy = player.y - friendNPC.y;
+  let dist = Math.sqrt(dx*dx + dy*dy);
+
+  // If player is close, NPC drifts away
+  if (dist < 150) {
+    friendNPC.x -= (dx / dist) * FRIEND_SPEED;
+    friendNPC.y -= (dy / dist) * FRIEND_SPEED;
+  } else {
+    // random wander
+    friendNPC.x += randomRange(-1, 1);
+    friendNPC.y += randomRange(-1, 1);
+  }
+
+  // clamp boundaries
+  friendNPC.x = Math.max(FRIEND_RADIUS, Math.min(CANVAS_WIDTH - FRIEND_RADIUS, friendNPC.x));
+  friendNPC.y = Math.max(FRIEND_RADIUS, Math.min(CANVAS_HEIGHT - FRIEND_RADIUS, friendNPC.y));
+}
+
+// ==================== POWER-UP & MISSILES ====================
+function updatePowerUpLogic() {
+  if (!powerUp || !powerUp.active) {
+    // countdown to spawn next power-up
+    powerUpSpawnTimer--;
+    if (powerUpSpawnTimer <= 0) {
+      spawnPowerUp();
+      powerUpSpawnTimer = POWERUP_SPAWN_INTERVAL;
+    }
+  }
+}
+
+// MISSILE LOGIC
+function fireMissile() {
+  let target = findClosestEnemy(player.x, player.y);
+  if (!target) return;
+
+  missiles.push({
+    x: player.x,
+    y: player.y,
+    speed: 5,
+    target: target
+  });
+}
+
+function findClosestEnemy(px, py) {
+  if (enemies.length === 0) return null;
+  let closest = enemies[0];
+  let closestDist = distance(px, py, closest.x, closest.y);
+
+  for (let i = 1; i < enemies.length; i++) {
+    let e = enemies[i];
+    let d = distance(px, py, e.x, e.y);
+    if (d < closestDist) {
+      closest = e;
+      closestDist = d;
+    }
+  }
+  return closest;
+}
+
+function updateMissiles() {
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    let m = missiles[i];
+    if (!enemies.includes(m.target)) {
+      // target no longer exists
+      missiles.splice(i, 1);
+      continue;
+    }
+    let dx = m.target.x - m.x;
+    let dy = m.target.y - m.y;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+    if (dist < 10) {
+      // hit enemy
+      let idx = enemies.indexOf(m.target);
+      if (idx !== -1) enemies.splice(idx, 1);
+      missiles.splice(i, 1);
+    } else {
+      // homing movement
+      m.x += (dx / dist) * m.speed;
+      m.y += (dy / dist) * m.speed;
+    }
+  }
+}
+
+// ==================== COLLISION & GAME STATE ====================
+function checkCollisions() {
+  // Enemy collisions
+  for (let i = 0; i < enemies.length; i++) {
+    let enemy = enemies[i];
+    let dx = player.x - enemy.x;
+    let dy = player.y - enemy.y;
+    let dist = Math.sqrt(dx*dx + dy*dy);
+
+    if (dist < COLLISION_DISTANCE && shieldTimer <= 0) {
+      loseLife();
+      return;
+    }
+  }
+
+  // Friendly NPC
+  if (friendNPC) {
+    let dxF = player.x - friendNPC.x;
+    let dyF = player.y - friendNPC.y;
+    let distF = Math.sqrt(dxF*dxF + dyF*dyF);
+    if (distF < COLLISION_DISTANCE - 5) {
+      collectedLetters += friendNPC.letter;
+      friendLetterIndex++;
+      if (collectedLetters.length >= targetWord.length) {
+        nextLevel();
+      } else {
+        friendNPC = createFriendNPC(targetWord[friendLetterIndex]);
+      }
+      updateUI();
+    }
+  }
+
+  // Power-Up
+  if (powerUp && powerUp.active) {
+    let dxP = player.x - powerUp.x;
+    let dyP = player.y - powerUp.y;
+    let distP = Math.sqrt(dxP*dxP + dyP*dyP);
+    if (distP < COLLISION_DISTANCE) {
+      applyPowerUpEffect(powerUp.type);
+      powerUp.active = false;
+      powerUp = null;
+    }
+  }
+}
+
+function loseLife() {
+  lives--;
+  updateUI();
+  if (lives <= 0) {
+    message = 'Game Over! Press R to restart this level.';
+    isGameOver = true;
+    updateUI();
+  } else {
+    resetPlayer();
+  }
+}
+
+function nextLevel() {
+  message = `You spelled "${targetWord}"! Moving to next level...`;
+  isGameOver = true;
+  updateUI();
+
+  setTimeout(() => {
+    currentLevelIndex++;
+    if (currentLevelIndex < LEVELS.length) {
+      loadLevel(currentLevelIndex);
+    } else {
+      message = 'CONGRATULATIONS! You completed all levels!';
+      updateUI();
+    }
+  }, 1500);
+}
+
+// ==================== POWER-UP EFFECTS ====================
+function applyPowerUpEffect(type) {
+  switch (type) {
+    case 'freeze':
+      freezeTimer = FREEZE_DURATION;
+      message = "Enemies frozen for 5s!";
+      break;
+    case 'shield':
+      shieldTimer = SHIELD_DURATION;
+      message = "Shield active for 5s!";
+      break;
+    case 'boost':
+      boostTimer = BOOST_DURATION;
+      playerSpeedMultiplier = 1.5;
+      message = "Speed boosted for 5s!";
+      break;
+    case 'health':
+      lives++;
+      message = "Gained +1 life!";
+      break;
+    case 'missile':
+      missileShots++;
+      message = "Gained +1 missile shot! Press SPACE to fire.";
+      break;
+  }
+  updateUI();
+}
+
+// ==================== RENDERING ====================
+function render() {
+  // Background
+  drawBackground();
+
+  // If the game hasn't started, we won't show other elements, 
+  // but you could if you want. We'll show them anyway for a nice backdrop.
+
+  // Player
+  drawPlayer();
+
+  // Enemies
+  drawEnemies();
+
+  // Friend NPC
+  drawFriendNPC();
+
+  // Power Up
+  drawPowerUp();
+
+  // Missiles
+  drawMissiles();
+}
+
+function drawBackground() {
+  let bgGradient = ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT);
+  bgGradient.addColorStop(0, '#1b2735');
+  bgGradient.addColorStop(1, '#090a0f');
+  ctx.fillStyle = bgGradient;
+  ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+  // Starfield
+  ctx.save();
+  stars.forEach(star => {
+    ctx.globalAlpha = star.alpha;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(star.x, star.y, star.size, star.size);
+  });
+  ctx.restore();
+}
+
+function drawPlayer() {
+  ctx.save();
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = (shieldTimer > 0) ? 'magenta' : 'lime';
+
+  let grad = ctx.createRadialGradient(player.x, player.y, 5, player.x, player.y, PLAYER_RADIUS);
+  if (shieldTimer > 0) {
+    grad.addColorStop(0, 'rgba(255,0,255,0.8)');
+    grad.addColorStop(1, 'rgba(150,0,150,0.8)');
+  } else {
+    grad.addColorStop(0, 'rgba(0,255,0,0.8)');
+    grad.addColorStop(1, 'rgba(0,150,0,0.8)');
+  }
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, PLAYER_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEnemies() {
+  enemies.forEach(enemy => {
+    ctx.save();
+    ctx.shadowBlur = 15;
+    ctx.shadowColor = 'red';
+
+    let grad = ctx.createRadialGradient(enemy.x, enemy.y, 5, enemy.x, enemy.y, ENEMY_RADIUS);
+    grad.addColorStop(0, 'rgba(255,0,0,0.8)');
+    grad.addColorStop(1, 'rgba(150,0,0,0.8)');
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(enemy.x, enemy.y, ENEMY_RADIUS, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.stroke();
+    ctx.restore();
+  });
+}
+
+function drawFriendNPC() {
+  if (!friendNPC) return;
+  ctx.save();
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = 'gold';
+
+  let grad = ctx.createRadialGradient(friendNPC.x, friendNPC.y, 5, friendNPC.x, friendNPC.y, FRIEND_RADIUS);
+  grad.addColorStop(0, 'rgba(255,255,0,0.9)');
+  grad.addColorStop(1, 'rgba(200,200,0,0.9)');
+
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(friendNPC.x, friendNPC.y, FRIEND_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.stroke();
+
+  // Letter text
+  ctx.fillStyle = '#000';
+  ctx.font = '16px Trebuchet MS, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(friendNPC.letter, friendNPC.x, friendNPC.y);
+  ctx.restore();
+}
+
+function drawPowerUp() {
+  if (!powerUp || !powerUp.active) return;
+  ctx.save();
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = powerUp.color;
+
+  let grad = ctx.createRadialGradient(powerUp.x, powerUp.y, 4, powerUp.x, powerUp.y, POWERUP_RADIUS);
+  grad.addColorStop(0, powerUp.color);
+  grad.addColorStop(1, 'rgba(0,0,0,0.5)');
+
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(powerUp.x, powerUp.y, POWERUP_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.stroke();
+
+  ctx.fillStyle = '#000';
+  ctx.font = '16px Trebuchet MS, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(powerUp.label, powerUp.x, powerUp.y);
+  ctx.restore();
+}
+
+function drawMissiles() {
+  ctx.save();
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = 'orange';
+  ctx.fillStyle = 'orange';
+
+  missiles.forEach(m => {
+    ctx.beginPath();
+    ctx.arc(m.x, m.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.restore();
+}
+
+// ==================== UTILS ====================
+function randomRange(min, max) {
+  return Math.random() * (max - min) + min;
+}
+
+function distance(x1, y1, x2, y2) {
+  let dx = x2 - x1;
+  let dy = y2 - y1;
+  return Math.sqrt(dx*dx + dy*dy);
+}
+
+function updateUI() {
+  document.getElementById('wordStatus').innerText 
+    = collectedLetters.padEnd(targetWord.length, '_');
+  document.getElementById('livesCount').innerText = lives;
+  document.getElementById('message').innerText = message;
+}
+</script>
+</body>
+</html>
